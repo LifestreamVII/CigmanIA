@@ -21,9 +21,69 @@ int main(int argc, char* argv[]) {
 
     Game game;
     game.ready("CigmanIA");
+    // Dénominateur pour calcul du cap de vaisseaux
+    int divisor_spawn = 75;
+    // Cap de vaisseaux proches du shipyard pour limiter les embouteillages
+    int cap_returning_nearby = 2;
 
     // On garde en mémoire si un vaisseau est en mode "retour à la base" ou non
     map<EntityId, bool> is_returning;
+
+    // Déterminer si on doit spawn un nouveau vaisseau pour un tour
+    auto should_spawn = [&](
+        const shared_ptr<Player>& me,
+        const unique_ptr<GameMap>& game_map,
+        const set<int>& occupied_indices,
+        const map<EntityId, bool>& is_returning,
+        const vector<shared_ptr<Ship>>& my_ships
+    ) -> bool {
+        const int w = game_map->width;
+        const int h = game_map->height;
+        const int area = w * h;
+
+        const int ship_count = (int)my_ships.size();
+
+        // Déterminer un cap de vaisseaux basé sur la taille de la carte
+        const int ship_cap = max(8, area / divisor_spawn);
+        if (ship_count >= ship_cap) return false;
+
+        // S'arrêter de spawn assez tôt en fonction de la taille de la carte
+        const int stop_buffer = (area <= 1600) ? 80 : 110;
+        if (game.turn_number > constants::MAX_TURNS - stop_buffer) return false;
+
+        // Economiser en gardant une réserve de halite au début de la partie
+        // 0-40: 500 de réserve, 40-120: 280 de réserve, 120+: 125 de réserve
+        int reserve = game.turn_number < 50 ? 500 : (game.turn_number < 120 ? 280 : 125);
+        if (me->halite < constants::SHIP_COST + reserve) return false;
+
+        // Vérifier que la base n'est pas bloquée par un vaisseau (soi ou autre)
+        const int shipyard_idx = me->shipyard->position.y * w + me->shipyard->position.x;
+        if (occupied_indices.count(shipyard_idx)) return false;
+        if (game_map->at(me->shipyard)->is_occupied()) return false;
+
+        // Eviter trop de vaisseaux qui rentrent en même temps
+        int returning_nearby = 0;
+        for (const auto& s : my_ships) {
+            bool ship_is_returning = false;
+            auto state_it = is_returning.find(s->id);
+            if (state_it != is_returning.end()) {
+                ship_is_returning = state_it->second;
+            }
+
+            if (ship_is_returning) {
+                int distance_to_shipyard =
+                    game_map->calculate_distance(s->position, me->shipyard->position);
+
+                // Proche si à moins de 4 cases de la base
+                if (distance_to_shipyard < 4) {
+                    returning_nearby++;
+                }
+            }
+        }
+        if (returning_nearby > cap_returning_nearby) return false;
+
+        return true;
+    };
 
     for (;;) {
         game.update_frame();
@@ -203,12 +263,8 @@ int main(int argc, char* argv[]) {
 
         int shipyard_idx = me->shipyard->position.y * map_width + me->shipyard->position.x;
 
-        // On arrête de produire 80 tours avant la fin
-        if (game.turn_number <= constants::MAX_TURNS - 80 &&
-            me->halite >= constants::SHIP_COST &&
-            !occupied_indices.count(shipyard_idx) &&
-            !game_map->at(me->shipyard)->is_occupied())
-        {
+        // On ne spawn que sous les conditions de should_spawn
+        if (should_spawn(me, game_map, occupied_indices, is_returning, my_ships)) {
             command_queue.push_back(me->shipyard->spawn());
         }
 
